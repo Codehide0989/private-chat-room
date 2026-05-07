@@ -2,6 +2,8 @@ import { InferRealtimeEvents, Realtime } from "@upstash/realtime";
 import z from "zod";
 import { redis } from "./redis";
 
+const messageStatus = z.enum(["pending", "sent", "delivered", "failed"]);
+
 const message = z.object({
   id: z.string(),
   sender: z.string(),
@@ -9,6 +11,10 @@ const message = z.object({
   timeStamp: z.number(),
   roomId: z.string(),
   token: z.string().optional(),
+  status: messageStatus.default("sent"),
+  sequence: z.number().optional(),
+  retryCount: z.number().default(0),
+  deliveredAt: z.number().optional(),
 });
 
 const schema = {
@@ -29,3 +35,4 @@ export const realtime = new Realtime({ schema, redis });
 
 export type RealtimeEvents = InferRealtimeEvents<typeof realtime>;
 export type Message = z.infer<typeof message>;
+export type MessageStatus = z.infer<typeof messageStatus>;

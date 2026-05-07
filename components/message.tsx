@@ -1,11 +1,15 @@
 import { Message as MessageType } from "@/lib/realtime";
+import { MessageStatusBadge } from "./message-status";
+import { memo } from "react";
 
 interface MessageProps {
   message: MessageType;
   isMe: boolean;
+  onRetry?: () => void;
+  onDelete?: () => void;
 }
 
-export const Message = ({ message, isMe }: MessageProps) => {
+const MessageComponent = ({ message, isMe, onRetry, onDelete }: MessageProps) => {
   return (
     <div
       className={`flex flex-col ${isMe ? "items-end" : "items-start"} space-y-1 mb-4`}
@@ -30,6 +34,16 @@ export const Message = ({ message, isMe }: MessageProps) => {
       >
         {message.text}
       </div>
+      {message.status && message.status !== "delivered" && (
+        <MessageStatusBadge
+          status={message.status}
+          retryCount={message.retryCount}
+          onRetry={onRetry}
+          onDelete={onDelete}
+        />
+      )}
     </div>
   );
 };
+
+export const Message = memo(MessageComponent);

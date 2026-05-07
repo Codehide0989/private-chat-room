@@ -1,7 +1,12 @@
 "use client";
 
 import { Message as MessageComponent } from "@/components/message";
+import { ConnectionBanner } from "@/components/connection-banner";
 import { useUsername } from "@/hooks/use-username";
+import { useMessageSend } from "@/hooks/use-message-send";
+import { useConnectionStatus } from "@/hooks/use-connection-status";
+import { useOfflineQueue } from "@/hooks/use-offline-queue";
+import { useMessageDeduplication } from "@/hooks/use-message-deduplication";
 import { client } from "@/lib/client";
 import type { Message } from "@/lib/realtime";
 import { useRealtime } from "@/lib/realtime-client";
@@ -29,6 +34,18 @@ const Page = () => {
 
   const [isDestroyed, setIsDestroyed] = useState(false);
   const [presence, setPresence] = useState<PresenceData | null>(null);
+
+  // Network and reliability hooks
+  const { status: connectionStatus, isOnline } = useConnectionStatus();
+  const { queue: offlineQueue, addToQueue, clearQueue } = useOfflineQueue(isOnline);
+  const deduplication = useMessageDeduplication();
+  const {
+    sendMessage: sendMessageWithHook,
+    isPending,
+    failedMessages,
+    retryFailedMessage,
+    deleteFailedMessage,
+  } = useMessageSend({ roomId, username });
 
   // Join the room and get TTL
   const { data: joinData, error: joinError } = useQuery({
@@ -59,13 +76,26 @@ const Page = () => {
     enabled: !!joinData,
   });
 
-  // Real-time updates
+  // Real-time updates with deduplication
   useRealtime({
     channels: [roomId],
     events: ["chat.message", "chat.presence", "chat.destroy"],
     onData: ({ event, data }) => {
       if (event === "chat.message") {
         const message = data as Message;
+
+        // Check for duplicates
+        if (!deduplication.addMessage(message)) {
+          console.log("[v0] Duplicate message received, skipping:", message.id);
+          return;
+        }
+
+        // Validate sequence for ordering
+        const { isValid, outOfOrder } = deduplication.validateSequence(message);
+        if (outOfOrder) {
+          console.warn("[v0] Out-of-order message detected:", message.id);
+        }
+
         queryClient.setQueryData(
           ["messages", roomId],
           (old: Message[] = []) => {
@@ -107,27 +137,22 @@ const Page = () => {
     }
   }, [history]);
 
-  const { mutate: sendMessage, isPending } = useMutation({
-    mutationFn: async ({ text }: { text: string }) => {
-      const res = await client.message.post(
-        {
-          sender: username,
-          text,
-        },
-        { query: { roomId } },
+  // Auto-flush offline queue when connection restored
+  useEffect(() => {
+    if (isOnline && offlineQueue.length > 0) {
+      console.log(
+        "[v0] Connection restored, flushing offline queue:",
+        offlineQueue.length,
+        "messages",
       );
-      if (res.error) {
-        throw new Error("Failed to send message");
-      }
-      return res.data as Message;
-    },
-    onSuccess: (message) => {
-      queryClient.setQueryData(["messages", roomId], (old: Message[] = []) => {
-        if (old.some((item) => item.id === message.id)) return old;
-        return [...old, message];
+      const queuesToSend = [...offlineQueue];
+      clearQueue();
+
+      queuesToSend.forEach((msg) => {
+        sendMessageWithHook(msg.text);
       });
-    },
-  });
+    }
+  }, [isOnline, offlineQueue, clearQueue, sendMessageWithHook]);
 
   const { mutate: destroyRoom } = useMutation({
     mutationFn: async () => {
@@ -204,6 +229,7 @@ const Page = () => {
 
   return (
     <main className="flex flex-col h-screen max-h-screen overflow-hidden">
+      <ConnectionBanner isOnline={isOnline} connectionStatus={connectionStatus} />
       <header className="border-b border-zinc-800 p-3 sm:p-4 flex items-center justify-between bg-zinc-900/30 sticky top-0 z-10">
         <div className="flex items-center gap-2 sm:gap-4 overflow-hidden">
           <div className="flex flex-col min-w-0">
@@ -261,6 +287,16 @@ const Page = () => {
             key={msg.id}
             message={msg}
             isMe={msg.sender === username}
+            onRetry={
+              failedMessages.has(msg.id)
+                ? () => retryFailedMessage(msg.id)
+                : undefined
+            }
+            onDelete={
+              failedMessages.has(msg.id)
+                ? () => deleteFailedMessage(msg.id)
+                : undefined
+            }
           />
         ))}
         {(!history || history.length === 0) && (
@@ -288,7 +324,11 @@ const Page = () => {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && input.trim()) {
-                  sendMessage({ text: input });
+                  if (isOnline) {
+                    sendMessageWithHook(input);
+                  } else {
+                    addToQueue(input);
+                  }
                   setInput("");
                   inputRef.current?.focus();
                 }
@@ -300,7 +340,11 @@ const Page = () => {
           <button
             onClick={() => {
               if (input.trim()) {
-                sendMessage({ text: input });
+                if (isOnline) {
+                  sendMessageWithHook(input);
+                } else {
+                  addToQueue(input);
+                }
                 inputRef.current?.focus();
                 setInput("");
               }
@@ -308,7 +352,7 @@ const Page = () => {
             disabled={!input.trim() || isPending}
             className="bg-zinc-800 text-zinc-400 px-4 sm:px-6 text-xs sm:text-sm font-bold hover:text-zinc-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shrink-0"
           >
-            SEND
+            {isOnline ? "SEND" : "QUEUE"}
           </button>
         </div>
       </div>
